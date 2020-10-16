@@ -128,7 +128,7 @@ Take the `cat` as an example.
 2. Download the pretrained model of `cat` and put it to `$ROOT/data/model/pvnet/cat/199.pth`.
 3. Visualize:
     ```
-    python run.py --type visualize --cfg_file configs/linemod.yaml model cat cls_type cat
+    python run.py --type visualize --cfg_file configs/linemod.yaml model cat
     ```
 
 If setup correctly, the output will look like
@@ -199,9 +199,9 @@ An example dataset can be downloaded at [here](https://zjueducn-my.sharepoint.co
     │   │   ├── 1234.png
     │   │   ├── ...
     │   ├── pose/
-    │   │   ├── pose0.npy
+    │   │   ├── 0.npy
     │   │   ├── ...
-    │   │   ├── pose1234.npy
+    │   │   ├── 1234.npy
     │   │   ├── ...
     │   │   └──
     ```
@@ -243,24 +243,4 @@ If you find this code useful for your research, please use the following BibTeX 
   booktitle={CVPR},
   year={2019}
 }
-```
-
-## Acknowledgement
-
-This work is affliated with ZJU-SenseTime Joint Lab of 3D Vision, and its intellectual property belongs to SenseTime Group Ltd.
-
-```
-Copyright (c) ZJU-SenseTime Joint Lab of 3D Vision. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 ```

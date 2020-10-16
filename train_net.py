@@ -6,10 +6,23 @@ from lib.utils.net_utils import load_model, save_model, load_network
 from lib.evaluators import make_evaluator
 import torch.multiprocessing
 
+import torch
+import numpy as np
+np.random.seed(1000)
+torch.manual_seed(0)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 
 def train(cfg, network):
+#     cfg.train.num_workers = 0
     if cfg.train.dataset[:4] != 'City':
         torch.multiprocessing.set_sharing_strategy('file_system')
+        
+    train_loader = make_data_loader(cfg, is_train=True, max_iter=cfg.ep_iter)
+    val_loader = make_data_loader(cfg, is_train=False)
+    # train_loader = make_data_loader(cfg, is_train=True, max_iter=100)
+    
     trainer = make_trainer(cfg, network)
     optimizer = make_optimizer(cfg, network)
     scheduler = make_lr_scheduler(cfg, optimizer)
@@ -18,10 +31,6 @@ def train(cfg, network):
 
     begin_epoch = load_model(network, optimizer, scheduler, recorder, cfg.model_dir, resume=cfg.resume)
     # set_lr_scheduler(cfg, scheduler)
-
-    train_loader = make_data_loader(cfg, is_train=True, max_iter=cfg.ep_iter)
-    val_loader = make_data_loader(cfg, is_train=False)
-    # train_loader = make_data_loader(cfg, is_train=True, max_iter=100)
 
     for epoch in range(begin_epoch, cfg.train.epoch):
         recorder.epoch = epoch

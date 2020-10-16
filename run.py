@@ -64,7 +64,11 @@ def run_evaluate():
     from lib.networks import make_network
     from lib.utils.net_utils import load_network
 
+    import numpy as np
+    np.random.seed(1000)
     torch.manual_seed(0)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     network = make_network(cfg).cuda()
     load_network(network, cfg.model_dir, epoch=cfg.test.epoch)
@@ -72,11 +76,25 @@ def run_evaluate():
 
     data_loader = make_data_loader(cfg, is_train=False)
     evaluator = make_evaluator(cfg)
+    
+    count = 1200
+    i = 0
     for batch in tqdm.tqdm(data_loader):
+        if i==count:
+            break
         inp = batch['inp'].cuda()
+        # save input
+#         print(batch['img_id'])
+#         import pickle
+#         with open('/mbrdi/sqnap1_colomirror/gupansh/input_cat.pkl','wb') as fp:
+#             pickle.dump(batch['inp'], fp)
+#         input()
+        seg_gt = batch['mask'].cuda()
         with torch.no_grad():
             output = network(inp)
         evaluator.evaluate(output, batch)
+        
+        i+=1
     evaluator.summarize()
 
 
@@ -224,4 +242,5 @@ def run_custom():
 
 if __name__ == '__main__':
     globals()['run_'+args.type]()
+
 
