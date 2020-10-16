@@ -8,7 +8,7 @@ from lib.utils.linemod import linemod_config
 import torch
 if cfg.test.icp:
     from lib.utils.icp import icp_utils
-    # from lib.utils.icp.icp_refiner.build import ext_
+    from lib.utils.icp.icp_refiner.build import ext_
 if cfg.test.un_pnp:
     from lib.csrc.uncertainty_pnp import un_pnp_utils
     import scipy
@@ -18,7 +18,19 @@ from scipy import spatial
 from lib.utils.vsd import inout
 from transforms3d.quaternions import mat2quat, quat2mat
 from lib.csrc.nn import nn_utils
+import pickle
+import cv2
+from lib.utils.linemod.linemod_config import linemod_K
 
+
+def find_nearest_point_distance(pts1,pts2):
+    '''
+    :param pts1:  pn1,2 or 3
+    :param pts2:  pn2,2 or 3
+    :return:
+    '''
+    idxs=nn_utils.find_nearest_point_idx(pts1,pts2)
+    return np.linalg.norm(pts1[idxs]-pts2,2,1)
 
 class Evaluator:
 
@@ -32,8 +44,13 @@ class Evaluator:
 
         data_root = args['data_root']
         cls = cfg.cls_type
+        self.cls = cls
         model_path = os.path.join('data/linemod', cls, cls + '.ply')
         self.model = pvnet_data_utils.get_ply_model(model_path)
+#         with open('/mbrdi/sqnap1_colomirror/gupansh/ape_model.pkl','wb') as fp:
+#             pickle.dump(self.model, fp)
+#         print('saved..')
+#         input()
         self.diameter = linemod_config.diameters[cls] / 100
 
         self.proj2d = []
@@ -48,13 +65,14 @@ class Evaluator:
 
         self.height = 480
         self.width = 640
+        if cfg.test.icp:
+            self.icp_refiner = ext_.Synthesizer(os.path.realpath(model_path))
+            self.icp_refiner.setup(self.width, self.height)
 
-        model = inout.load_ply(model_path)
-        model['pts'] = model['pts'] * 1000
-        self.icp_refiner = icp_utils.ICPRefiner(model, (self.width, self.height)) if cfg.test.icp else None
-        # if cfg.test.icp:
-        #     self.icp_refiner = ext_.Synthesizer(os.path.realpath(model_path))
-        #     self.icp_refiner.setup(self.width, self.height)
+        with open('data/linemod/'+cls+'/translation_min.pkl', 'rb') as fp:
+            self.translation_min = pickle.load(fp)
+        with open('data/linemod/'+cls+'/translation_max.pkl', 'rb') as fp:
+            self.translation_max = pickle.load(fp)
 
     def projection_2d(self, pose_pred, pose_targets, K, icp=False, threshold=5):
         model_2d_pred = pvnet_pose_utils.project(self.model, K, pose_pred)
@@ -64,6 +82,13 @@ class Evaluator:
             self.icp_proj2d.append(proj_mean_diff < threshold)
         else:
             self.proj2d.append(proj_mean_diff < threshold)
+    
+    def projection_2d_sym(self, pose_pred, pose_targets, K, threshold=5):
+        model_2d_pred = pvnet_pose_utils.project(self.model, K, pose_pred)
+        model_2d_targets = pvnet_pose_utils.project(self.model, K, pose_targets)
+        proj_mean_diff=np.mean(find_nearest_point_distance(model_2d_pred,model_2d_targets))
+
+        self.proj2d.append(proj_mean_diff < threshold)
 
     def add_metric(self, pose_pred, pose_targets, icp=False, syn=False, percentage=0.1):
         diameter = self.diameter * percentage
@@ -76,11 +101,13 @@ class Evaluator:
         else:
             mean_dist = np.mean(np.linalg.norm(model_pred - model_targets, axis=-1))
 
+#         print(mean_dist)
+#         input()
         if icp:
             self.icp_add.append(mean_dist < diameter)
         else:
             self.add.append(mean_dist < diameter)
-
+        
     def cm_degree_5_metric(self, pose_pred, pose_targets, icp=False):
         translation_distance = np.linalg.norm(pose_pred[:, 3] - pose_targets[:, 3]) * 100
         rotation_diff = np.dot(pose_pred[:, :3], pose_targets[:, :3].T)
@@ -98,7 +125,7 @@ class Evaluator:
         iou = (mask_pred & mask_gt).sum() / (mask_pred | mask_gt).sum()
         self.mask_ap.append(iou > 0.7)
 
-    def icp_refine(self, pose_pred, anno, output, K):
+    def icp_refine_(self, pose_pred, anno, output, K):
         depth = read_depth(anno['depth_path'])
         mask = torch.argmax(output['seg'], dim=1)[0].detach().cpu().numpy()
         if pose_pred[2, 3] <= 0:
@@ -130,7 +157,7 @@ class Evaluator:
 
         return pose_pred
 
-    def icp_refine_(self, pose, anno, output):
+    def icp_refine(self, pose, anno, output):
         depth = read_depth(anno['depth_path']).astype(np.uint16)
         mask = torch.argmax(output['seg'], dim=1)[0].detach().cpu().numpy()
         mask = mask.astype(np.int32)
@@ -180,14 +207,37 @@ class Evaluator:
         K = np.array(anno['K'])
 
         pose_gt = np.array(anno['pose'])
+        
+        # only for LinemodVal
+#         K = linemod_K
+#         dist_coeffs = np.zeros((4,1))
+#         (_, rvec, tvec) = cv2.solvePnP(kpt_3d, kpt_2d.astype(np.float32), K, dist_coeffs)
+#         rot = cv2.Rodrigues(rvec)[0]
+#         pose_gt = np.concatenate([rot, tvec], axis=1)
+        
         if cfg.test.un_pnp:
             var = output['var'][0].detach().cpu().numpy()
             pose_pred = self.uncertainty_pnp(kpt_3d, kpt_2d, var, K)
         else:
-            pose_pred = pvnet_pose_utils.pnp(kpt_3d, kpt_2d, K)
+#             pose_pred = pvnet_pose_utils.pnp(kpt_3d, kpt_2d, K)
+#           single stage
+            pose_pred = output['pred_pose'][0].detach().cpu().numpy()
+#           # un-normalize translation
+#             means = np.array([ 5.0421385e-04, -5.2776873e-02,  8.8903457e-01])
+#             vars = np.array([0.00630739, 0.00344274, 0.01582594]) * 2
+#             stds = np.sqrt(vars)
+#             pose_pred[:,3] *= vars
+#             pose_pred[:,3] += means
+            minT = self.translation_min
+            maxT = self.translation_max
+            pose_pred[:,3] =  (pose_pred[:,3] + 0.5) * (maxT - minT) + minT
+            
+#         print(pose_pred)
+#         print(pose_gt)
+#         input()
 
         if cfg.test.icp:
-            pose_pred_icp = self.icp_refine(pose_pred.copy(), anno, output, K)
+            pose_pred_icp = self.icp_refine(pose_pred.copy(), anno, output)
             if cfg.cls_type in ['eggbox', 'glue']:
                 self.add_metric(pose_pred_icp, pose_gt, syn=True, icp=True)
             else:
@@ -197,6 +247,7 @@ class Evaluator:
 
         if cfg.cls_type in ['eggbox', 'glue']:
             self.add_metric(pose_pred, pose_gt, syn=True)
+#             self.projection_2d_sym(pose_pred, pose_gt, K)
         else:
             self.add_metric(pose_pred, pose_gt)
         self.projection_2d(pose_pred, pose_gt, K)
@@ -212,6 +263,15 @@ class Evaluator:
         print('ADD metric: {}'.format(add))
         print('5 cm 5 degree metric: {}'.format(cmd5))
         print('mask ap70: {}'.format(ap))
+        
+#         # for can_triplet, starts from 169
+#         with open('data/linemod/'+self.cls+'/ADD_LinemodVal.txt','a') as fp:
+#             fp.write(str(add))
+#             fp.write('\n')
+#         with open('data/linemod/'+self.cls+'/Proj2d_LinemodVal.txt','a') as fp:
+#             fp.write(str(proj2d))
+#             fp.write('\n')
+            
         if cfg.test.icp:
             print('2d projections metric after icp: {}'.format(np.mean(self.icp_proj2d)))
             print('ADD metric after icp: {}'.format(np.mean(self.icp_add)))
@@ -224,3 +284,5 @@ class Evaluator:
         self.icp_add = []
         self.icp_cmd5 = []
         return {'proj2d': proj2d, 'add': add, 'cmd5': cmd5, 'ap': ap}
+
+
