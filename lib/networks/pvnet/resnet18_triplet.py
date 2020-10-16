@@ -6,7 +6,7 @@ import numpy as np
 from .resnet import resnet18
 from lib.csrc.ransac_voting.ransac_voting_gpu import ransac_voting_layer, ransac_voting_layer_v3, estimate_voting_distribution_with_mean
 from lib.config import cfg
-from .singlestage import SimplePnPNet
+from .singlestage_triplet import SimplePnPNet
 from .utils import quaternion2rotation
 
 
@@ -154,6 +154,7 @@ class Resnet18(nn.Module):
         
         batch_idx_used = []
         image_features = []
+        triplet_loss = torch.zeros(batch_size).cuda()
         for b in range(batch_size):
             seg_mask = batch_seg_mask[b]
             seg_indices = seg_mask.nonzero()
@@ -173,21 +174,19 @@ class Resnet18(nn.Module):
                 sampled_indices = np.random.choice(range(seg_indices.shape[0]), 200, replace=False)
                 
                 dx = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 0]
-#                 dx = dx.transpose(0,1).contiguous()
+                dx = dx.transpose(0,1).contiguous()
                 dx = dx.view(-1,1).squeeze()
                 dy = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 1]
-#                 dy = dy.transpose(0,1).contiguous()
+                dy = dy.transpose(0,1).contiguous()
                 dy = dy.view(-1,1).squeeze()
 
                 pred_dx.append(dx)
                 pred_dy.append(dy)
                 
                 px = seg_indices[sampled_indices,1].float() / w
-#                 px = px.repeat(vn_2//2)
-                px = px.repeat_interleave(vn_2//2)
+                px = px.repeat(vn_2//2)
                 py = seg_indices[sampled_indices,0].float() / h
-#                 py = py.repeat(vn_2//2)
-                py = py.repeat_interleave(vn_2//2)
+                py = py.repeat(vn_2//2)
                 pred_x.append(px)
                 pred_y.append(py)
                 
@@ -222,7 +221,7 @@ class Resnet18(nn.Module):
             pred_xydxdy = torch.stack([pred_x, pred_y, pred_dx, pred_dy], 2)
             pred_xydxdy = pred_xydxdy.permute(0,2,1)
 
-            pred_pose = self.single_stage(pred_xydxdy)
+            pred_pose, triplet_loss = self.single_stage(pred_xydxdy)
         
         batch_pred_pose = torch.zeros(batch_size, 3, 4).cuda()
         mask_pose = torch.zeros(batch_size).cuda()
@@ -235,7 +234,7 @@ class Resnet18(nn.Module):
             mask_pose[batch_idx_used] = 1
            
 
-        ret = {'seg': seg_pred, 'vertex': ver_pred, 'pred_pose':batch_pred_pose, 'mask_pose':mask_pose}
+        ret = {'seg': seg_pred, 'vertex': ver_pred, 'pred_pose':batch_pred_pose, 'mask_pose':mask_pose, 'triplet_loss': triplet_loss}
 #         ret = {'seg': seg_pred, 'vertex': ver_pred}
 
         if not self.training:

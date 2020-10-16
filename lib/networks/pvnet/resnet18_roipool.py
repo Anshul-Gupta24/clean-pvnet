@@ -6,7 +6,7 @@ import numpy as np
 from .resnet import resnet18
 from lib.csrc.ransac_voting.ransac_voting_gpu import ransac_voting_layer, ransac_voting_layer_v3, estimate_voting_distribution_with_mean
 from lib.config import cfg
-from .singlestage import SimplePnPNet
+from .singlestage2 import SimplePnPNet
 from .utils import quaternion2rotation
 
 
@@ -65,7 +65,8 @@ class Resnet18(nn.Module):
 #         self.onexone = nn.Conv2d(128, 1, 1, 1, 0, bias=False)
         
         self.N_grid = 2
-        self.single_stage = SimplePnPNet(4).cuda()
+#         self.single_stage = SimplePnPNet(4).cuda()
+        self.single_stage = SimplePnPNet(4, 128//self.N_grid*self.N_grid*self.N_grid).cuda()
         self.minNoiseSigma = 0
         self.maxNoiseSigma = 15
         self.minOutlier = 0
@@ -90,36 +91,26 @@ class Resnet18(nn.Module):
 
     def forward(self, x, seg_gt=torch.zeros(1), feature_alignment=False):       
         x2s, x4s, x8s, x16s, x32s, xfc = self.resnet18_8s(x)
-        encoder = [x2s, x4s, x8s, x16s, x32s, xfc]
-        decoder = []
 
         fm=self.conv8s(torch.cat([xfc,x8s],1))
-        decoder.append(fm.clone())
+#         fm_copy = fm.clone().detach()
+        
+#         image_features = self.onexone(fm_copy)
+#         image_features = image_features.reshape(image_features.shape[0], image_features.shape[2]*image_features.shape[3])
 
         fm=self.up8sto4s(fm)
         if fm.shape[2]==136:
             fm = nn.functional.interpolate(fm, (135,180), mode='bilinear', align_corners=False)
 
         fm=self.conv4s(torch.cat([fm,x4s],1))
-        decoder.append(fm.clone())
+        fm_copy = fm.clone().detach()
         
         fm=self.up4sto2s(fm)
-        fm=self.conv2s(torch.cat([fm,x2s],1))
-        decoder.append(fm.clone())
-        
-        fm=self.up2storaw(fm)
-        x=self.convraw(torch.cat([fm,x],1))
-        
-        # save encoder, decoder features
-#         encoder = [f.detach().cpu().numpy() for f in encoder]
-#         decoder = [f.detach().cpu().numpy() for f in decoder]
-#         with open('/mbrdi/sqnap1_colomirror/gupansh/encoder_holepuncher.pkl','wb') as fp:
-#             pickle.dump(encoder, fp)
-#         with open('/mbrdi/sqnap1_colomirror/gupansh/decoder_holepuncher.pkl','wb') as fp:
-#             pickle.dump(decoder, fp)
-#         input()
 
-        
+        fm=self.conv2s(torch.cat([fm,x2s],1))
+        fm=self.up2storaw(fm)
+
+        x=self.convraw(torch.cat([fm,x],1))
         seg_pred=x[:,:self.seg_dim,:,:]
         ver_pred=x[:,self.seg_dim:,:,:]
         
@@ -142,15 +133,7 @@ class Resnet18(nn.Module):
         if seg_gt.dim()!=1:
             batch_seg_mask = seg_gt
         else:
-            conf, batch_seg_mask = torch.max(seg_pred, dim=1)
-        
-        # save segmentation, confidence
-#         with open('/mbrdi/sqnap1_colomirror/gupansh/segmentation.pkl','wb') as fp:
-#             pickle.dump(batch_seg_mask.detach().cpu().numpy(), fp)
-#         with open('/mbrdi/sqnap1_colomirror/gupansh/confidence.pkl','wb') as fp:
-#             pickle.dump(conf.detach().cpu().numpy(), fp)
-#         input()
-        
+            batch_seg_mask = torch.argmax(seg_pred, dim=1)
         
         batch_idx_used = []
         image_features = []
@@ -173,24 +156,58 @@ class Resnet18(nn.Module):
                 sampled_indices = np.random.choice(range(seg_indices.shape[0]), 200, replace=False)
                 
                 dx = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 0]
-#                 dx = dx.transpose(0,1).contiguous()
                 dx = dx.view(-1,1).squeeze()
                 dy = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 1]
-#                 dy = dy.transpose(0,1).contiguous()
                 dy = dy.view(-1,1).squeeze()
 
                 pred_dx.append(dx)
                 pred_dy.append(dy)
                 
                 px = seg_indices[sampled_indices,1].float() / w
-#                 px = px.repeat(vn_2//2)
                 px = px.repeat_interleave(vn_2//2)
                 py = seg_indices[sampled_indices,0].float() / h
-#                 py = py.repeat(vn_2//2)
                 py = py.repeat_interleave(vn_2//2)
                 pred_x.append(px)
                 pred_y.append(py)
                 
+                
+                ###################################################
+                ## ROI POOL
+                ###################################################
+
+                # get bounding box for object
+                bbox = np.array([seg_indices[:,0].min(), seg_indices[:,1].min(), seg_indices[:,0].max(), seg_indices[:,1].max()])
+                bbox_scaled = (bbox / pow(2,4-self.N_grid)).astype(np.int)
+                bbox_scaled[2] = max(bbox_scaled[0]+1, bbox_scaled[2])
+                bbox_scaled[3] = max(bbox_scaled[1]+1, bbox_scaled[3])
+                # create NXN grid
+                N_h = self.N_grid
+                N_w = self.N_grid
+                bbox_kh = int((bbox_scaled[2] - bbox_scaled[0]) / N_h)
+                bbox_kw = int((bbox_scaled[3] - bbox_scaled[1]) / N_w)
+                if bbox_kh==0:
+                    N_h = 1
+                    N_w = self.N_grid*self.N_grid
+                    bbox_kh = int((bbox_scaled[2] - bbox_scaled[0]) / N_h)
+                    bbox_kw = int((bbox_scaled[3] - bbox_scaled[1]) / N_w)
+                elif bbox_kw==0:
+                    N_w = 1
+                    N_h = self.N_grid*self.N_grid
+                    bbox_kh = int((bbox_scaled[2] - bbox_scaled[0]) / N_h)
+                    bbox_kw = int((bbox_scaled[3] - bbox_scaled[1]) / N_w)
+                # get features and apply max pool on each block
+                img_feat = fm_copy[b, :, bbox_scaled[0]:bbox_scaled[2], bbox_scaled[1]:bbox_scaled[3]]
+                try:
+                    img_feat = nn.MaxPool2d([bbox_kh, bbox_kw], [bbox_kh, bbox_kw])(img_feat)
+                except:
+                    print(bbox_scaled)
+                    print(bbox_kh)
+                    print(bbox_kw)
+                    input()
+                img_feat = img_feat[:, :N_h, :N_w]
+                img_feat = img_feat.reshape(img_feat.shape[0]*img_feat.shape[1]*img_feat.shape[2])
+                image_features.append(img_feat)
+
         
         if len(batch_idx_used) != 0:
             pred_dx = torch.stack(pred_dx, 0)
@@ -222,7 +239,10 @@ class Resnet18(nn.Module):
             pred_xydxdy = torch.stack([pred_x, pred_y, pred_dx, pred_dy], 2)
             pred_xydxdy = pred_xydxdy.permute(0,2,1)
 
-            pred_pose = self.single_stage(pred_xydxdy)
+#             pred_pose = self.single_stage(pred_xydxdy)
+#             image_features = image_features[batch_idx_used]
+            image_features = torch.stack(image_features, 0)
+            pred_pose = self.single_stage(pred_xydxdy, image_features)
         
         batch_pred_pose = torch.zeros(batch_size, 3, 4).cuda()
         mask_pose = torch.zeros(batch_size).cuda()

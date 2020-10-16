@@ -6,7 +6,8 @@ import numpy as np
 from .resnet import resnet18
 from lib.csrc.ransac_voting.ransac_voting_gpu import ransac_voting_layer, ransac_voting_layer_v3, estimate_voting_distribution_with_mean
 from lib.config import cfg
-from .singlestage import SimplePnPNet
+from .singlestage_triplet import SimplePnPNet
+# from .singlestage import SimplePnPNet
 from .utils import quaternion2rotation
 
 
@@ -61,10 +62,7 @@ class Resnet18(nn.Module):
             nn.Conv2d(raw_dim, seg_dim+ver_dim, 1, 1)
         )
         self.up2storaw = nn.UpsamplingBilinear2d(scale_factor=2)
-        
-#         self.onexone = nn.Conv2d(128, 1, 1, 1, 0, bias=False)
-        
-        self.N_grid = 2
+                
         self.single_stage = SimplePnPNet(4).cuda()
         self.minNoiseSigma = 0
         self.maxNoiseSigma = 15
@@ -130,10 +128,10 @@ class Resnet18(nn.Module):
         
         # x refers to horizontal coord and y refers to vertical coord
         # refer to /lib/utils/pvnet/pvnet_data_utils.py 'compute_vertex' function
-        pred_dx = []
-        pred_dy = []
         pred_x = []
         pred_y = []
+        pred_dx = []
+        pred_dy = []
         
         ver_pred_reshape = ver_pred.permute(0, 2, 3, 1)
         batch_size, h, w, vn_2 = ver_pred_reshape.shape
@@ -154,6 +152,7 @@ class Resnet18(nn.Module):
         
         batch_idx_used = []
         image_features = []
+        triplet_loss = torch.zeros(batch_size).cuda()
         for b in range(batch_size):
             seg_mask = batch_seg_mask[b]
             seg_indices = seg_mask.nonzero()
@@ -167,29 +166,75 @@ class Resnet18(nn.Module):
 
     
             # randomly sample 200 points
-            if seg_indices.shape[0] >= 200:
+            if seg_indices.shape[0] >= 250:
                 batch_idx_used.append(b)
                 
-                sampled_indices = np.random.choice(range(seg_indices.shape[0]), 200, replace=False)
+                sampled_indices_total = np.random.choice(range(seg_indices.shape[0]), 250, replace=False)
+                sampled_indices = sampled_indices_total[:200]
                 
                 dx = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 0]
-#                 dx = dx.transpose(0,1).contiguous()
+                dx = dx.transpose(0,1).contiguous()
                 dx = dx.view(-1,1).squeeze()
                 dy = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 1]
-#                 dy = dy.transpose(0,1).contiguous()
+                dy = dy.transpose(0,1).contiguous()
                 dy = dy.view(-1,1).squeeze()
-
-                pred_dx.append(dx)
-                pred_dy.append(dy)
+                dxy = torch.stack([dx, dy], 1)
+                dxy_norm = torch.norm(dxy,dim=1)
+                dx = dx / dxy_norm
+                dy = dy / dxy_norm
                 
-                px = seg_indices[sampled_indices,1].float() / w
-#                 px = px.repeat(vn_2//2)
-                px = px.repeat_interleave(vn_2//2)
-                py = seg_indices[sampled_indices,0].float() / h
-#                 py = py.repeat(vn_2//2)
-                py = py.repeat_interleave(vn_2//2)
-                pred_x.append(px)
-                pred_y.append(py)
+                px = seg_indices[sampled_indices,1].float()
+                px = px.repeat(vn_2//2)
+#                 px = px.repeat_interleave(vn_2//2)
+                py = seg_indices[sampled_indices,0].float()
+                py = py.repeat(vn_2//2)
+#                 py = py.repeat_interleave(vn_2//2)
+                
+                sampled_indices = sampled_indices_total[200:]
+                sampled_indices = sampled_indices.repeat(4)
+                dx_pair = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 0]
+                dx_pair = dx_pair.transpose(0,1).contiguous()
+                dx_pair = dx_pair.view(-1,1).squeeze()
+                dy_pair = ver_pred_reshape[b, seg_indices[sampled_indices,0], seg_indices[sampled_indices,1], :, 1]
+                dy_pair = dy_pair.transpose(0,1).contiguous()
+                dy_pair = dy_pair.view(-1,1).squeeze()
+                dxy_pair = torch.stack([dx_pair, dy_pair], 1)
+                dxy_pair_norm = torch.norm(dxy_pair,dim=1)
+                dx_pair = dx_pair / dxy_pair_norm
+                dy_pair = dy_pair / dxy_pair_norm
+                
+                px_pair = seg_indices[sampled_indices,1].float()
+                px_pair = px_pair.repeat(vn_2//2)
+#                 px_pair = px_pair.repeat_interleave(vn_2//2)
+                py_pair = seg_indices[sampled_indices,0].float()
+                py_pair = py_pair.repeat(vn_2//2)
+#                 py_pair = py_pair.repeat_interleave(vn_2//2)
+                
+                A = torch.stack([dx_pair, -dx, dy_pair, -dy], 1)
+                A = A.reshape(1800, 2, 2)
+                
+                B = torch.stack([px - px_pair, py - py_pair], 1)
+                B = B.unsqueeze(2)
+                
+                X, _ = torch.solve(B, A)
+                X_1 = X[:,1].squeeze()
+#                 dx.retain_grad()
+#                 print('dx', dx.grad)
+#                 dx.register_hook(lambda x: print('dx', x))
+#                 X_1.retain_grad()
+#                 print('X_1', X_1.grad)
+#                 X_1.register_hook(lambda x: print('X_1', x))
+#                 input()
+                delx = X_1*dx
+                dely = X_1*dy 
+                
+                pred_x.append(px / w)
+                pred_y.append(py / h)
+                pred_dx.append(delx / w)
+                pred_dy.append(dely / w)
+#                 print('px', px.view(200,9)[:5] + delx.view(200,9)[:5])
+#                 print('py', py.view(200,9)[:5] + dely.view(200,9)[:5])
+#                 input()
                 
         
         if len(batch_idx_used) != 0:
@@ -222,9 +267,11 @@ class Resnet18(nn.Module):
             pred_xydxdy = torch.stack([pred_x, pred_y, pred_dx, pred_dy], 2)
             pred_xydxdy = pred_xydxdy.permute(0,2,1)
 
-            pred_pose = self.single_stage(pred_xydxdy)
+            pred_pose, triplet_loss = self.single_stage(pred_xydxdy.detach())
+#             pred_pose = self.single_stage(pred_xydxdy.detach())
         
         batch_pred_pose = torch.zeros(batch_size, 3, 4).cuda()
+#         batch_pred_xy = torch.zeros(batch_size, 1800, 2).cuda()
         mask_pose = torch.zeros(batch_size).cuda()
         
         if len(batch_idx_used) != 0:
@@ -233,9 +280,11 @@ class Resnet18(nn.Module):
             pred_pose_rt = torch.cat([pred_pose_rot, pred_pose_trans],2)
             batch_pred_pose[batch_idx_used] = pred_pose_rt
             mask_pose[batch_idx_used] = 1
+#             batch_pred_xy[batch_idx_used] = pred_xy.permute(0,2,1)
            
 
-        ret = {'seg': seg_pred, 'vertex': ver_pred, 'pred_pose':batch_pred_pose, 'mask_pose':mask_pose}
+        ret = {'seg': seg_pred, 'vertex': ver_pred, 'pred_pose':batch_pred_pose, 'mask_pose':mask_pose, 'triplet_loss': triplet_loss}
+#         ret = {'seg': seg_pred, 'vertex': ver_pred, 'pred_pose':batch_pred_pose, 'mask_pose':mask_pose, 'pred_xy': batch_pred_xy}
 #         ret = {'seg': seg_pred, 'vertex': ver_pred}
 
         if not self.training:
