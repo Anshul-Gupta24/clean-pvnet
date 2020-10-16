@@ -10,6 +10,7 @@ from lib.utils.base_utils import read_pickle
 from lib.utils.linemod.linemod_config import linemod_cls_names, linemod_K, blender_K
 import matplotlib.pyplot as plt
 import glob
+import pickle
 
 
 def read_mask(path, split, cls_idx=1):
@@ -133,6 +134,8 @@ def record_real_ann(model_meta, img_id, ann_id, images, annotations):
     inds = np.loadtxt(os.path.join(data_root, cls, split + '.txt'), np.str)
     inds = [int(os.path.basename(ind).replace('.jpg', '')) for ind in inds]
 
+    translation_min = np.zeros(3) + 1000
+    translation_max = np.zeros(3) - 1000
     for ind in tqdm.tqdm(inds):
         img_name = '{:06}.jpg'.format(ind)
         rgb_path = os.path.join(rgb_dir, img_name)
@@ -161,8 +164,11 @@ def record_real_ann(model_meta, img_id, ann_id, images, annotations):
         anno.update({'data_root': rgb_dir})
         anno.update({'type': 'real', 'cls': cls})
         annotations.append(anno)
+        
+        translation_min = np.minimum(translation_min, pose[:,3])
+        translation_max = np.maximum(translation_max, pose[:,3])
 
-    return img_id, ann_id
+    return img_id, ann_id, translation_min, translation_max
 
 
 def record_fuse_ann(model_meta, img_id, ann_id, images, annotations):
@@ -174,12 +180,22 @@ def record_fuse_ann(model_meta, img_id, ann_id, images, annotations):
     fps_3d = model_meta['fps_3d']
     K = model_meta['K']
 
-    fuse_dir = os.path.join(data_root, 'fuse')
+    dir_name = model_meta['dir_name']
+    fuse_dir = os.path.join(data_root, dir_name)
+#     fuse_dir = os.path.join(data_root, 'fuse_new')
+#     fuse_dir = os.path.join(data_root, 'fuse_new2')
     original_K = linemod_K
     ann_num = len(glob.glob(os.path.join(fuse_dir, '*.pkl')))
+#     ann_num=20000
     cls_idx = linemod_cls_names.index(cls)
+    
+    translation_min = np.zeros(3) + 1000
+    translation_max = np.zeros(3) - 1000
     for ind in tqdm.tqdm(range(ann_num)):
         mask_path = os.path.join(fuse_dir, '{}_mask.png'.format(ind))
+        if not os.path.exists(mask_path):
+            print(ind, ' skipped!!!')
+            continue
         mask_real = read_mask(mask_path, 'fuse', cls_idx + 1)
         if (np.sum(mask_real) < 400):
             continue
@@ -211,8 +227,11 @@ def record_fuse_ann(model_meta, img_id, ann_id, images, annotations):
         anno.update({'type': 'fuse', 'cls': cls})
         annotations.append(anno)
         images.append(info)
+        
+        translation_min = np.minimum(translation_min, pose[:,3])
+        translation_max = np.maximum(translation_max, pose[:,3])
 
-    return img_id, ann_id
+    return img_id, ann_id, translation_min, translation_max
 
 
 def record_render_ann(model_meta, img_id, ann_id, images, annotations):
@@ -224,9 +243,15 @@ def record_render_ann(model_meta, img_id, ann_id, images, annotations):
     fps_3d = model_meta['fps_3d']
     K = model_meta['K']
 
-    render_dir = os.path.join(data_root, 'renders', cls)
+    dir_name = model_meta['dir_name']
+    render_dir = os.path.join(data_root, dir_name, cls)
+#     render_dir = os.path.join(data_root, 'renders_new', cls)
     ann_num = len(glob.glob(os.path.join(render_dir, '*.pkl')))
     K = blender_K
+#     K = linemod_K
+    
+    translation_min = np.zeros(3) + 1000
+    translation_max = np.zeros(3) - 1000
     for ind in tqdm.tqdm(range(ann_num)):
         img_name = '{}.jpg'.format(ind)
         rgb_path = os.path.join(render_dir, img_name)
@@ -253,8 +278,12 @@ def record_render_ann(model_meta, img_id, ann_id, images, annotations):
         anno.update({'data_root': render_dir})
         anno.update({'type': 'render', 'cls': cls})
         annotations.append(anno)
+        
+        translation_min = np.minimum(translation_min, pose[:,3])
+        translation_max = np.maximum(translation_max, pose[:,3])
 
-    return img_id, ann_id
+#     return img_id, ann_id
+    return img_id, ann_id, translation_min, translation_max
 
 
 def _linemod_to_coco(cls, split):
@@ -283,15 +312,36 @@ def _linemod_to_coco(cls, split):
     ann_id = 0
     images = []
     annotations = []
+    
+    translation_min = np.zeros(3) + 1000
+    translation_max = np.zeros(3) - 1000
 
     if split == 'occ':
         img_id, ann_id = record_occ_ann(model_meta, img_id, ann_id, images, annotations)
     elif split == 'train' or split == 'test':
-        img_id, ann_id = record_real_ann(model_meta, img_id, ann_id, images, annotations)
-
+#         img_id, ann_id = record_real_ann(model_meta, img_id, ann_id, images, annotations)
+        img_id, ann_id, t_min, t_max = record_real_ann(model_meta, img_id, ann_id, images, annotations)
+        translation_min = np.minimum(translation_min, t_min)
+        translation_max = np.maximum(translation_max, t_max)
+        
     if split == 'train':
-        img_id, ann_id = record_fuse_ann(model_meta, img_id, ann_id, images, annotations)
-        img_id, ann_id = record_render_ann(model_meta, img_id, ann_id, images, annotations)
+#         img_id, ann_id = record_fuse_ann(model_meta, img_id, ann_id, images, annotations)
+#         img_id, ann_id = record_render_ann(model_meta, img_id, ann_id, images, annotations)
+        model_meta['dir_name'] = 'fuse'
+        img_id, ann_id, t_min, t_max = record_fuse_ann(model_meta, img_id, ann_id, images, annotations)
+        translation_min = np.minimum(translation_min, t_min)
+        translation_max = np.maximum(translation_max, t_max)
+        model_meta['dir_name'] = 'renders'
+        img_id, ann_id, t_min, t_max = record_render_ann(model_meta, img_id, ann_id, images, annotations)
+        translation_min = np.minimum(translation_min, t_min)
+        translation_max = np.maximum(translation_max, t_max)
+    
+    if split=='val':
+        model_meta['dir_name'] = 'fuse_val'
+        img_id, ann_id, _, _ = record_fuse_ann(model_meta, img_id, ann_id, images, annotations)
+        model_meta['dir_name'] = 'renders_val'
+        img_id, ann_id, _, _ = record_render_ann(model_meta, img_id, ann_id, images, annotations)
+
 
     categories = [{'supercategory': 'none', 'id': 1, 'name': cls}]
     instance = {'images': images, 'annotations': annotations, 'categories': categories}
@@ -299,9 +349,16 @@ def _linemod_to_coco(cls, split):
     anno_path = os.path.join(data_root, cls, split + '.json')
     with open(anno_path, 'w') as f:
         json.dump(instance, f)
+        
+    if split=='train':
+        with open('data/linemod/'+cls+'/translation_min.pkl', 'wb') as fp:
+            pickle.dump(translation_min, fp)
+        with open('data/linemod/'+cls+'/translation_max.pkl', 'wb') as fp:
+            pickle.dump(translation_max, fp)
 
 
 def linemod_to_coco(cfg, only_test=False):
     _linemod_to_coco(cfg.cls_type, 'train')
     _linemod_to_coco(cfg.cls_type, 'test')
     _linemod_to_coco(cfg.cls_type, 'occ')
+#     _linemod_to_coco(cfg.cls_type, 'val')
