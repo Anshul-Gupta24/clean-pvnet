@@ -3,6 +3,7 @@ import numpy as np
 import math
 import torchvision.transforms as transforms
 from PIL import Image
+import pickle
 
 
 def resize_keep_aspect_ratio(img, imsize, intp_type=cv2.INTER_LINEAR):
@@ -67,6 +68,36 @@ def rotate_instance(img, mask, hcoords, rot_ang_min, rot_ang_max):
     last_row = np.asarray([[0, 0, 1]], np.float32)
     hcoords = np.matmul(hcoords, np.concatenate([R, last_row], 0).transpose())
     return img, mask, hcoords
+
+
+def rotate_instance_pose(img, mask, hcoords, pose, camera_matrix, rot_ang_min, rot_ang_max):
+    camera_matrix_inv = np.linalg.inv(camera_matrix)
+    
+    h, w = img.shape[0], img.shape[1]
+    degree = np.random.uniform(rot_ang_min, rot_ang_max)
+    hs, ws = np.nonzero(mask)
+    R = cv2.getRotationMatrix2D((np.mean(ws), np.mean(hs)), degree, 1)
+    mask = cv2.warpAffine(mask, R, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    img = cv2.warpAffine(img, R, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    last_row = np.asarray([[0, 0, 1]], np.float32)
+    hcoords = np.matmul(hcoords, np.concatenate([R, last_row], 0).transpose())
+    
+    # rotate pose!!
+    rot = R[:2,:2]
+    rot_mat = np.zeros((3,3))
+    rot_mat[:2,:2] = rot
+    rot_mat[2,2] = 1
+    rot_mat[0,2] = np.mean(ws)
+    rot_mat[1,2] = np.mean(hs)
+    
+    sub = np.eye(3)
+    sub[0,2] = -np.mean(ws)
+    sub[1,2] = -np.mean(hs)
+    rot_mat = np.dot(rot_mat, sub)
+    
+    pose = np.dot(camera_matrix_inv, np.dot(rot_mat, np.dot(camera_matrix, pose)))
+    
+    return img, mask, hcoords, pose
 
 
 def flip(img, mask, hcoords):
@@ -167,6 +198,64 @@ def crop_or_padding_to_fixed_size_instance(img, mask, hcoords, th, tw, overlap_r
     return img, mask, hcoords
 
 
+def crop_or_padding_to_fixed_size_instance_pose(img, mask, hcoords, pose, camera_matrix, th, tw, overlap_ratio=0.5):
+    
+    h, w, _ = img.shape
+    hs, ws = np.nonzero(mask)
+
+    hmin, hmax = np.min(hs), np.max(hs)
+    wmin, wmax = np.min(ws), np.max(ws)
+    fh, fw = hmax - hmin, wmax - wmin
+    hpad, wpad = th >= h, tw >= w
+
+    hrmax = int(min(hmin + overlap_ratio * fh, h - th))  # h must > target_height else hrmax<0
+    hrmin = int(max(hmin + overlap_ratio * fh - th, 0))
+    wrmax = int(min(wmin + overlap_ratio * fw, w - tw))  # w must > target_width else wrmax<0
+    wrmin = int(max(wmin + overlap_ratio * fw - tw, 0))
+
+    hbeg = 0 if hpad else np.random.randint(hrmin, hrmax)
+    hend = hbeg + th
+    wbeg = 0 if wpad else np.random.randint(wrmin,
+                                            wrmax)  # if pad then [0,wend] will larger than [0,w], indexing it is safe
+    wend = wbeg + tw
+
+    img = img[hbeg:hend, wbeg:wend]
+    mask = mask[hbeg:hend, wbeg:wend]
+
+    hcoords[:, 0] -= wbeg * hcoords[:, 2]
+    hcoords[:, 1] -= hbeg * hcoords[:, 2]
+
+    h_trans = hbeg
+    w_trans = wbeg
+    
+    if hpad or wpad:
+        nh, nw, _ = img.shape
+        new_img = np.zeros([th, tw, 3], dtype=img.dtype)
+        new_mask = np.zeros([th, tw], dtype=mask.dtype)
+
+        hbeg = 0 if not hpad else (th - h) // 2
+        wbeg = 0 if not wpad else (tw - w) // 2
+        
+        h_trans -= hbeg
+        w_trans -= wbeg
+
+        new_img[hbeg:hbeg + nh, wbeg:wbeg + nw] = img
+        new_mask[hbeg:hbeg + nh, wbeg:wbeg + nw] = mask
+        hcoords[:, 0] += wbeg * hcoords[:, 2]
+        hcoords[:, 1] += hbeg * hcoords[:, 2]
+
+        img, mask = new_img, new_mask
+        
+    rot_mat = np.eye(3)
+    rot_mat[0,2] = -w_trans
+    rot_mat[1,2] = -h_trans
+    
+    camera_matrix_inv = np.linalg.inv(camera_matrix)    
+    pose = np.dot(camera_matrix_inv, np.dot(rot_mat, np.dot(camera_matrix, pose)))      
+
+    return img, mask, hcoords, pose
+
+
 def crop_or_padding_to_fixed_size(img, mask, th, tw):
     h, w, _ = img.shape
     hpad, wpad = th >= h, tw >= w
@@ -196,7 +285,49 @@ def crop_or_padding_to_fixed_size(img, mask, th, tw):
     return img, mask
 
 
-def mask_out_instance(img, mask, min_side=0.1, max_side=0.3):
+def crop_or_padding_to_fixed_size_pose(img, mask, pose, camera_matrix, th, tw):
+    
+    h, w, _ = img.shape
+    hpad, wpad = th >= h, tw >= w
+
+    hbeg = 0 if hpad else np.random.randint(0, h - th)
+    wbeg = 0 if wpad else np.random.randint(0,
+                                            w - tw)  # if pad then [0,wend] will larger than [0,w], indexing it is safe
+    hend = hbeg + th
+    wend = wbeg + tw
+
+    img = img[hbeg:hend, wbeg:wend]
+    mask = mask[hbeg:hend, wbeg:wend]
+
+    h_trans = hbeg
+    w_trans = wbeg
+    if hpad or wpad:
+        nh, nw, _ = img.shape
+        new_img = np.zeros([th, tw, 3], dtype=img.dtype)
+        new_mask = np.zeros([th, tw], dtype=mask.dtype)
+
+        hbeg = 0 if not hpad else (th - h) // 2
+        wbeg = 0 if not wpad else (tw - w) // 2
+        
+        h_trans -= hbeg
+        w_trans -= wbeg
+
+        new_img[hbeg:hbeg + nh, wbeg:wbeg + nw] = img
+        new_mask[hbeg:hbeg + nh, wbeg:wbeg + nw] = mask
+
+        img, mask = new_img, new_mask
+
+    rot_mat = np.eye(3)
+    rot_mat[0,2] = -w_trans
+    rot_mat[1,2] = -h_trans
+    
+    camera_matrix_inv = np.linalg.inv(camera_matrix)    
+    pose = np.dot(camera_matrix_inv, np.dot(rot_mat, np.dot(camera_matrix, pose)))
+        
+    return img, mask, pose
+
+
+def mask_out_instance(img, mask, min_side=0.3, max_side=0.9):
     ys, xs = np.nonzero(mask)
     xmin, xmax = np.min(xs), np.max(xs)
     ymin, ymax = np.min(ys), np.max(ys)
@@ -293,6 +424,46 @@ def crop_resize_instance_v1(img, mask, hcoords, imheight, imwidth,
     hcoords[:, 1] = hcoords[:, 1] / resize_ratio
 
     return img, mask, hcoords
+
+
+def crop_resize_instance_v1_pose(img, mask, hcoords, pose, camera_matrix, imheight, imwidth,
+                            overlap_ratio=0.5, ratio_min=0.7, ratio_max=1.3):
+    '''
+
+    crop a region with [imheight*resize_ratio,imwidth*resize_ratio]
+    which at least overlap with foreground bbox with overlap
+    :param img:
+    :param mask:
+    :param hcoords:
+    :param imheight:
+    :param imwidth:
+    :param overlap_ratio:
+    :param ratio_min:
+    :param ratio_max:
+    :return:
+    '''
+    camera_matrix_inv = np.linalg.inv(camera_matrix)
+    
+    resize_ratio = np.random.uniform(ratio_min, ratio_max)
+#     resize_ratio = 0.7
+    target_height = int(imheight * resize_ratio)
+    target_width = int(imwidth * resize_ratio)
+
+    img, mask, hcoords, pose = crop_or_padding_to_fixed_size_instance_pose(
+        img, mask, hcoords, pose, camera_matrix, target_height, target_width, overlap_ratio)
+
+    img = cv2.resize(img, (imwidth, imheight), interpolation=cv2.INTER_LINEAR)
+    mask = cv2.resize(mask, (imwidth, imheight), interpolation=cv2.INTER_NEAREST)
+
+    hcoords[:, 0] = hcoords[:, 0] / resize_ratio
+    hcoords[:, 1] = hcoords[:, 1] / resize_ratio
+    
+    rot_mat = np.eye(3)
+#     rot_mat[:2,:] /= resize_ratio
+    rot_mat[2] *= resize_ratio
+    pose = np.dot(camera_matrix_inv, np.dot(rot_mat, np.dot(camera_matrix, pose)))
+
+    return img, mask, hcoords, pose
 
 
 def crop_resize_instance_v2(img, mask, hcoords, imheight, imwidth,
@@ -399,3 +570,66 @@ def augmentation(rgb, mask, hcoords, height, width, split):
         ])
         rgb = test_img_transforms(Image.fromarray(np.ascontiguousarray(rgb, np.uint8)))
     return rgb, mask, hcoords
+
+
+def translate_instance_pose(img, mask, hcoords, pose, camera_matrix, overlap_ratio=0.1, trans_max_ratio=0.2):
+    
+    h, w, _ = img.shape
+    hs, ws = np.nonzero(mask)
+
+    hmin, hmax = np.min(hs), np.max(hs)
+    wmin, wmax = np.min(ws), np.max(ws)
+    fh, fw = hmax - hmin, wmax - wmin
+    
+    trans_max_h = trans_max_ratio * h
+    trans_max_w = trans_max_ratio * w
+    
+    left_max = min(trans_max_w, wmin + overlap_ratio*fw)
+    right_max = max(w - trans_max_w, wmax - overlap_ratio*fw)
+    top_max = min(trans_max_h, hmin + overlap_ratio*fh)
+    bottom_max = max(h - trans_max_h, hmax - overlap_ratio*fh)
+    
+    hor = np.random.rand() > 0.5
+    ver = np.random.rand() > 0.5
+    
+    if hor==0:
+        wbeg = np.random.randint(0, left_max)
+        wend = w
+        twbeg = 0
+        w_trans = -wbeg
+    else:
+        wbeg = 0
+        wend = np.random.randint(right_max, w)
+        twbeg = w - wend
+        w_trans = twbeg
+    if ver==0:
+        hbeg = np.random.randint(0, top_max)
+        hend = h
+        thbeg = 0
+        h_trans = -hbeg
+    else:
+        hbeg = 0
+        hend = np.random.randint(bottom_max, h)
+        thbeg = h - hend
+        h_trans = thbeg
+    
+    th = hend - hbeg
+    tw = wend - wbeg
+    
+    img_new = np.zeros(img.shape, dtype=np.uint8)
+    mask_new = np.zeros(mask.shape, dtype=np.uint8)
+    img_new[thbeg:thbeg+th,twbeg:twbeg+tw] = img[hbeg:hend, wbeg:wend]
+    mask_new[thbeg:thbeg+th,twbeg:twbeg+tw] = mask[hbeg:hend, wbeg:wend]
+    
+    hcoords[:, 0] += w_trans * hcoords[:, 2]
+    hcoords[:, 1] += h_trans * hcoords[:, 2]
+    
+    rot_mat = np.eye(3)
+    rot_mat[0,2] = w_trans
+    rot_mat[1,2] = h_trans
+    
+    camera_matrix_inv = np.linalg.inv(camera_matrix)
+    pose_new = np.dot(camera_matrix_inv, np.dot(rot_mat, np.dot(camera_matrix, pose)))
+
+    return img_new, mask_new, hcoords, pose_new
+    
