@@ -4,6 +4,7 @@ from torch import nn
 import numpy as np
 import torch.nn.functional
 from collections import OrderedDict
+import pdb
 
 
 def sigmoid(x):
@@ -261,6 +262,25 @@ class GeoCrossEntropyLoss(nn.Module):
         loss = -(output * kernel.transpose(2, 1)).sum(1).mean()
         return loss
 
+    
+def load_state(net, checkpoint):
+    source_state = checkpoint['net']
+    target_state = net.state_dict()
+    new_target_state = OrderedDict()
+#     for target_key, target_value in target_state.items():
+    for source_key, source_value in source_state.items():
+#         if target_key in source_state and source_state[target_key].size() == target_state[target_key].size():
+        if source_key in target_state and source_state[source_key].size() == target_state[source_key].size():
+#             new_target_state[target_key] = source_state[target_key]
+            new_target_state[source_key] = source_state[source_key]
+        else:
+#             new_target_state[target_key] = target_state[target_key]
+            new_target_state[source_key] = target_state[source_key]
+            print('[WARNING] Not found pre-trained parameters for {}'.format(target_key))
+
+    target_state.update(new_target_state)
+    net.load_state_dict(target_state)    
+    
 
 def load_model(net, optim, scheduler, recorder, model_dir, resume=True, epoch=-1):
     if not resume:
@@ -279,9 +299,11 @@ def load_model(net, optim, scheduler, recorder, model_dir, resume=True, epoch=-1
     print('Load model: {}'.format(os.path.join(model_dir, '{}.pth'.format(pth))))
     pretrained_model = torch.load(os.path.join(model_dir, '{}.pth'.format(pth)))
     net.load_state_dict(pretrained_model['net'])
+#     load_state(net, pretrained_model)
     optim.load_state_dict(pretrained_model['optim'])
     scheduler.load_state_dict(pretrained_model['scheduler'])
     recorder.load_state_dict(pretrained_model['recorder'])
+#     return pth+1
     return pretrained_model['epoch'] + 1
 
 
@@ -357,3 +379,4 @@ def remove_net_layer(net, layers):
             if k.startswith(layer):
                 del net[k]
     return net
+
